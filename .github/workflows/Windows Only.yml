@@ -1,0 +1,135 @@
+name: Flutter Build (Windows Only)
+
+on:
+  workflow_call:
+    inputs:
+      upload-artifact:
+        required: false
+        type: boolean
+        default: false
+      upload-tag:
+        required: false
+        type: string
+        default: "dev"
+    secrets:
+      GH_PAT:
+        required: true
+      WINDOWS_CERTIFICATE_BASE64:
+        required: true
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: true
+
+env:
+  VERSION: "1.3.0-nightly" # 示例版本，实际可从代码读取
+  TAG_NAME: ${{ inputs.upload-tag }}
+
+jobs:
+  build-RustDeskTempTopMostWindow:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - name: Build RustDeskTempTopMostWindow
+        run: |
+          cd flutter/windows/RustDeskTempTopMostWindow
+          cargo build --release --target=x86_64-pc-windows-msvc
+      - name: Upload RustDeskTempTopMostWindow
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-temp-topmost-window
+          path: flutter/windows/RustDeskTempTopMostWindow/target/x86_64-pc-windows-msvc/release/*.dll
+
+  generate-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Generate FFI bridge
+        run: |
+          cd flutter
+          make gen_bridge
+      - name: Upload bridge files
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-bridge
+          path: flutter/lib/generated/
+
+  build-for-windows-flutter:
+    name: Windows Flutter (x64)
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Download bridge
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-bridge
+          path: flutter/lib/generated/
+      - name: Download RustDeskTempTopMostWindow
+        uses: actions/download-artifact@v4
+        with:
+          name: rustdesk-temp-topmost-window
+          path: flutter/windows/RustDeskTempTopMostWindow/target/x86_64-pc-windows-msvc/release/
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.0"
+          channel: "stable"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - name: Build Rust lib for Flutter
+        run: |
+          cd flutter
+          make lib
+      - name: Build Flutter Windows app
+        run: |
+          cd flutter
+          flutter build windows --release
+      - name: Prepare unsigned output
+        run: |
+          mkdir -p rustdesk-unsigned-windows-x86_64
+          cp -r flutter/build/windows/x64/runner/Release/* rustdesk-unsigned-windows-x86_64/
+      - name: Upload unsigned artifact
+        if: ${{ inputs.upload-artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-unsigned-windows-x86_64
+          path: rustdesk-unsigned-windows-x86_64/
+
+  publish_unsigned:
+    needs: [build-for-windows-flutter]
+    runs-on: ubuntu-latest
+    if: ${{ inputs.upload-artifact }}
+    steps:
+      - name: Download unsigned artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rustdesk-unsigned-windows-x86_64
+          path: ./
+      - name: Create archive
+        run: |
+          tar czf rustdesk-${{ env.VERSION }}-unsigned.tar.gz rustdesk-unsigned-windows-x86_64/
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG_NAME }}
+          files: rustdesk-${{ env.VERSION }}-unsigned.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
